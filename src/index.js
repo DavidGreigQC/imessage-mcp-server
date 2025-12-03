@@ -16,6 +16,80 @@ import { open } from 'sqlite';
 import path from 'path';
 import os from 'os';
 
+// Extract text from attributedBody blob (used by RCS and some iMessages)
+function extractTextFromAttributedBody(blob) {
+  if (!blob) return null;
+
+  try {
+    const buffer = Buffer.isBuffer(blob) ? blob : Buffer.from(blob);
+
+    // Extract readable sequences from the binary data
+    const allMatches = [];
+    let current = '';
+    let inText = false;
+
+    for (let i = 0; i < buffer.length; i++) {
+      const byte = buffer[i];
+      // Printable ASCII range (space to ~) or common unicode continuation bytes
+      if ((byte >= 32 && byte <= 126) || (byte >= 192 && byte <= 255)) {
+        current += String.fromCharCode(byte);
+        inText = true;
+      } else if (inText && current.length > 0) {
+        const cleaned = current.trim();
+        // Filter out metadata and system strings
+        if (cleaned.length >= 2 && isMessageContent(cleaned)) {
+          allMatches.push(cleaned);
+        }
+        current = '';
+        inText = false;
+      }
+    }
+
+    // Check final segment
+    if (current.trim().length >= 2) {
+      const cleaned = current.trim();
+      if (isMessageContent(cleaned)) {
+        allMatches.push(cleaned);
+      }
+    }
+
+    // Return the longest meaningful text (usually the actual message)
+    if (allMatches.length > 0) {
+      const meaningful = allMatches.filter(m => m.length > 3);
+      if (meaningful.length > 0) {
+        return meaningful.reduce((a, b) => a.length > b.length ? a : b);
+      }
+      return allMatches[0];
+    }
+
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Check if a string looks like actual message content vs metadata
+function isMessageContent(str) {
+  // Exclude common metadata patterns
+  const metadataPatterns = [
+    'NSString', 'NSAttributed', 'NSDictionary', 'NSMutable', 'NSObject',
+    'streamtyped', '__kIM', 'MessagePart', 'AttributeName',
+    'at_1_', 'CB7E', // UUID-like patterns
+  ];
+
+  for (const pattern of metadataPatterns) {
+    if (str.includes(pattern)) return false;
+  }
+
+  // Exclude strings that look like identifiers/UUIDs
+  if (str.match(/^[A-F0-9\-]{8,}$/i)) return false;
+
+  // Exclude strings that are just symbols
+  if (str.match(/^[\+\-\*\#\@\(\)\[\]]+$/)) return false;
+
+  return true;
+}
+
 class iMessageServer {
   constructor() {
     this.server = new Server(
@@ -260,6 +334,7 @@ class iMessageServer {
           SELECT
             datetime(m.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as timestamp,
             m.text,
+            m.attributedBody,
             m.is_from_me,
             h.id as sender,
             m.service
@@ -268,7 +343,7 @@ class iMessageServer {
           LEFT JOIN handle h ON m.handle_id = h.ROWID
           WHERE cmj.chat_id IN (${chatIds.join(',')})
             AND m.date > ?
-            AND m.text IS NOT NULL AND m.text != ''
+            AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
           ORDER BY m.date DESC
           LIMIT ?
         `, [threshold, limit]);
@@ -299,6 +374,7 @@ class iMessageServer {
           SELECT
             datetime(m.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as timestamp,
             m.text,
+            m.attributedBody,
             m.is_from_me,
             h.id as sender,
             m.service
@@ -306,7 +382,7 @@ class iMessageServer {
           LEFT JOIN handle h ON m.handle_id = h.ROWID
           WHERE m.handle_id IN (${handleIds.join(',')})
             AND m.date > ?
-            AND m.text IS NOT NULL AND m.text != ''
+            AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
           ORDER BY m.date DESC
           LIMIT ?
         `, [threshold, limit]);
@@ -320,12 +396,20 @@ class iMessageServer {
 
       await db.close();
 
-      const formattedMessages = messages.map(m => ({
-        timestamp: m.timestamp,
-        sender: m.is_from_me ? 'You' : (m.sender || 'Unknown'),
-        text: m.text,
-        service: m.service,
-      }));
+      const formattedMessages = messages.map(m => {
+        // Try text first, then attributedBody
+        let text = m.text;
+        if (!text || text.trim() === '') {
+          text = extractTextFromAttributedBody(m.attributedBody);
+        }
+
+        return {
+          timestamp: m.timestamp,
+          sender: m.is_from_me ? 'You' : (m.sender || 'Unknown'),
+          text: text || '[attachment or unsupported content]',
+          service: m.service,
+        };
+      }).filter(m => m.text && m.text !== '[attachment or unsupported content]');
 
       return {
         content: [{
@@ -353,6 +437,7 @@ class iMessageServer {
         SELECT
           datetime(m.date/1000000000 + strftime('%s', '2001-01-01'), 'unixepoch', 'localtime') as timestamp,
           m.text,
+          m.attributedBody,
           m.is_from_me,
           h.id as sender,
           c.display_name as group_name,
@@ -363,20 +448,27 @@ class iMessageServer {
         LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
         LEFT JOIN chat c ON cmj.chat_id = c.ROWID
         WHERE m.date > ?
-          AND m.text IS NOT NULL AND m.text != ''
+          AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
         ORDER BY m.date DESC
         LIMIT ?
       `, [threshold, limit]);
 
       await db.close();
 
-      const formattedMessages = messages.map(m => ({
-        timestamp: m.timestamp,
-        conversation: m.group_name || m.chat_identifier || m.sender || 'Unknown',
-        sender: m.is_from_me ? 'You' : (m.sender || 'Unknown'),
-        text: m.text,
-        service: m.service_name,
-      }));
+      const formattedMessages = messages.map(m => {
+        let text = m.text;
+        if (!text || text.trim() === '') {
+          text = extractTextFromAttributedBody(m.attributedBody);
+        }
+
+        return {
+          timestamp: m.timestamp,
+          conversation: m.group_name || m.chat_identifier || m.sender || 'Unknown',
+          sender: m.is_from_me ? 'You' : (m.sender || 'Unknown'),
+          text: text || '[attachment]',
+          service: m.service_name,
+        };
+      }).filter(m => m.text && m.text !== '[attachment]');
 
       return {
         content: [{
