@@ -61,7 +61,7 @@ Once configured, you can ask Claude things like:
 
 - "List my recent conversations"
 - "Search for messages from John"
-- "Read messages from the FBLA group chat"
+- "Read messages from the work group chat"
 - "Show me messages from the last 24 hours"
 
 ## Available Tools
