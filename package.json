@@ -1,0 +1,19 @@
+{
+  "name": "imessage-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for reading iMessages, SMS, and RCS - including mixed group chats",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": ["mcp", "imessage", "sms", "rcs", "claude"],
+  "author": "David G",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "sqlite3": "^5.1.7",
+    "sqlite": "^5.1.1"
+  }
+}
